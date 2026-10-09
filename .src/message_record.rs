@@ -140,7 +140,8 @@ impl Message {
     /// The Message `bytes` hold in its one binary form, and nothing after
     /// it, each Section's Stream kept ([`Stream::kept`]) where `content`
     /// says its identifier's bytes are read from — the Ledger's chunks,
-    /// which this crate does not reach — at the length recorded.
+    /// which this crate does not reach — at the length recorded, which
+    /// `content` is told, so it can hold what it reads to it.
     ///
     /// # Errors
     ///
@@ -149,7 +150,7 @@ impl Message {
     /// `content` failed.
     pub fn from_record(
         bytes: &[u8],
-        mut content: impl FnMut(StreamId) -> Result<Arc<dyn Content>, CodecError>,
+        mut content: impl FnMut(StreamId, u64) -> Result<Arc<dyn Content>, CodecError>,
     ) -> Result<Self, CodecError> {
         let mut cursor = Cursor::new(bytes);
         let form = cursor.byte()?;
@@ -178,7 +179,7 @@ impl Message {
             Ok(MessageSection {
                 section_id,
                 name,
-                stream: Stream::kept(stream, length, media_type, content(stream)?),
+                stream: Stream::kept(stream, length, media_type, content(stream, length)?),
                 contract,
             })
         })?;
@@ -289,8 +290,8 @@ mod tests {
     }
 
     /// Where the one Stream the tests keep is read from.
-    fn ledger(stream: StreamId) -> Result<Arc<dyn Content>, CodecError> {
-        assert_eq!(stream, StreamId::new(3));
+    fn ledger(stream: StreamId, length: u64) -> Result<Arc<dyn Content>, CodecError> {
+        assert_eq!((stream, length), (StreamId::new(3), 8));
         Ok(Arc::new(Kept(b"<Order/>")))
     }
 
@@ -321,7 +322,7 @@ mod tests {
             MessageTreatment::BUSINESS,
         );
         assert!(large.record().len() < 400, "{}", large.record().len());
-        let read = Message::from_record(&large.record(), |_| {
+        let read = Message::from_record(&large.record(), |_, _| {
             Ok(Arc::new(Kept(b"xxxxxxxxx")) as Arc<dyn Content>)
         })
         .expect("a record keeps no content to check");
