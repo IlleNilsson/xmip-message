@@ -44,6 +44,15 @@ use crate::{
 /// The form's number, the first byte of every record written in it.
 pub const FORM: u8 = 1;
 
+impl MessageCreationSource {
+    /// Its number in the Message's one binary form: what Xmip Storage's
+    /// `message.created_by` column keeps, numbered once.
+    #[must_use]
+    pub fn number(self) -> u8 {
+        place(&SOURCES, &self)
+    }
+}
+
 // Every value of each kind, in the order the form numbers them, which only
 // grows at its end.
 const SOURCES: [MessageCreationSource; 4] = [
