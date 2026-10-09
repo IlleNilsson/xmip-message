@@ -5,16 +5,19 @@
 //!
 //! **The Message, not its content.** A Section's Stream is in the Ledger
 //! already, in chunks, under its own identifier, and a Stream is never
-//! copied: the record keeps the Stream's identifier, its length and its
-//! media type, and a record read back holds each Stream kept where its
-//! caller reads it from — the Ledger's chunks — never whole. What the Message accumulates — its lineage, its treatment, its
+//! copied: the record keeps the Stream's identifier and its media type, and
+//! a record read back holds each Stream kept where its caller reads it
+//! from — the Ledger's chunks, at the length the Stream's own record keeps
+//! — never whole. What the Message accumulates — its lineage, its treatment, its
 //! Context — is written whole.
 //!
 //! **Binary, not JSON.** The record is written for every Message and read
 //! by the next step's thread, so the fields are written in their order — no
 //! names, no padding: identifiers as 16 bytes big-endian, a count, a length
 //! or a generation as a varint, text as its length and its UTF-8 bytes, an
-//! absent value as one byte saying so, each enumeration as its number. JSON
+//! absent value as one byte saying so, each enumeration as its number in the
+//! form (its word, [`MessagePriority::word`] and its siblings, is what Xmip
+//! Storage's columns keep). JSON
 //! would spend bytes on names and time on a text parser at every hand-on,
 //! and the estate keeps no JSON at rest (ADR-0031 clause 3). The first byte
 //! is the form's number, [`FORM`], so a form that follows can still read
@@ -42,43 +45,55 @@ use crate::{
 };
 
 /// The form's number, the first byte of every record written in it.
-pub const FORM: u8 = 1;
+pub const FORM: u8 = 2;
 
-impl MessageCreationSource {
-    /// Its number in the Message's one binary form: what Xmip Storage's
-    /// `message.created_by` column keeps, numbered once.
-    #[must_use]
-    pub fn number(self) -> u8 {
-        place(&SOURCES, &self)
-    }
+/// An enumeration's word, as the enum names its variant: what Xmip
+/// Storage's `message` columns keep, and what a search asks them by, with
+/// the variant a word names, from the same table.
+macro_rules! worded {
+    ($kind:ty, $all:expr, $column:literal, { $($variant:ident),+ $(,)? }) => {
+        impl $kind {
+            #[doc = concat!("Its word, as the enum names it: what Xmip Storage's `message.",
+                $column, "` column keeps.")]
+            #[must_use]
+            pub const fn word(self) -> &'static str {
+                match self {
+                    $(Self::$variant => stringify!($variant),)+
+                }
+            }
+
+            /// The variant `word` names, as `word` writes it.
+            #[must_use]
+            pub fn worded(word: &str) -> Option<Self> {
+                $all.into_iter().find(|variant| variant.word() == word)
+            }
+        }
+    };
 }
 
-impl MessagePriority {
-    /// Its number in the Message's one binary form: what Xmip Storage's
-    /// `message.priority` column keeps, numbered once.
-    #[must_use]
-    pub fn number(self) -> u8 {
-        place(&PRIORITIES, &self)
-    }
-}
-
-impl ExecutionProfile {
-    /// Its number in the Message's one binary form: what Xmip Storage's
-    /// `message.execution_profile` column keeps, numbered once.
-    #[must_use]
-    pub fn number(self) -> u8 {
-        place(&PROFILES, &self)
-    }
-}
-
-impl MessageDurability {
-    /// Its number in the Message's one binary form: what Xmip Storage's
-    /// `message.durability` column keeps, numbered once.
-    #[must_use]
-    pub fn number(self) -> u8 {
-        place(&DURABILITIES, &self)
-    }
-}
+worded!(MessageCreationSource, SOURCES, "created_by", {
+    Receive,
+    Assignment,
+    Transformation,
+    SendPreparation,
+});
+worded!(MessagePriority, PRIORITIES, "priority", {
+    Immediate,
+    High,
+    Normal,
+    Low,
+    Background,
+});
+worded!(ExecutionProfile, PROFILES, "execution_profile", {
+    Conversation,
+    Business,
+    PassThrough,
+});
+worded!(MessageDurability, DURABILITIES, "durability", {
+    Ephemeral,
+    Durable,
+    Recoverable,
+});
 
 // Every value of each kind, in the order the form numbers them, which only
 // grows at its end.
@@ -124,8 +139,7 @@ impl Message {
         many(&mut out, &self.sections, |out, section| {
             out.u128_be(section.section_id.value());
             optional(out, section.name.as_deref(), text);
-            out.u128_be(section.stream.id().value())
-                .varint(section.stream.len() as u64);
+            out.u128_be(section.stream.id().value());
             optional(out, section.stream.media_type(), text);
             optional(out, section.contract.as_deref(), text);
         });
@@ -140,8 +154,10 @@ impl Message {
     /// The Message `bytes` hold in its one binary form, and nothing after
     /// it, each Section's Stream kept ([`Stream::kept`]) where `content`
     /// says its identifier's bytes are read from — the Ledger's chunks,
-    /// which this crate does not reach — at the length recorded, which
-    /// `content` is told, so it can hold what it reads to it.
+    /// which this crate does not reach — and how long the Stream is: its
+    /// length has one home, the Stream's own record beside its chunks, not
+    /// the Message (the owner, 2026-10-09: *a Message refers to a stream, a
+    /// stream is stored in chunks*).
     ///
     /// # Errors
     ///
@@ -150,7 +166,7 @@ impl Message {
     /// `content` failed.
     pub fn from_record(
         bytes: &[u8],
-        mut content: impl FnMut(StreamId, u64) -> Result<Arc<dyn Content>, CodecError>,
+        mut content: impl FnMut(StreamId) -> Result<(u64, Arc<dyn Content>), CodecError>,
     ) -> Result<Self, CodecError> {
         let mut cursor = Cursor::new(bytes);
         let form = cursor.byte()?;
@@ -173,13 +189,15 @@ impl Message {
             let section_id = SectionId::new(c.u128_be()?);
             let name = read_optional(c, read_text)?;
             let stream = StreamId::new(c.u128_be()?);
-            let length = c.varint()?;
             let media_type = read_optional(c, read_text)?;
             let contract = read_optional(c, read_text)?;
             Ok(MessageSection {
                 section_id,
                 name,
-                stream: Stream::kept(stream, length, media_type, content(stream, length)?),
+                stream: {
+                    let (length, kept) = content(stream)?;
+                    Stream::kept(stream, length, media_type, kept)
+                },
                 contract,
             })
         })?;
@@ -290,9 +308,9 @@ mod tests {
     }
 
     /// Where the one Stream the tests keep is read from.
-    fn ledger(stream: StreamId, length: u64) -> Result<Arc<dyn Content>, CodecError> {
-        assert_eq!((stream, length), (StreamId::new(3), 8));
-        Ok(Arc::new(Kept(b"<Order/>")))
+    fn ledger(stream: StreamId) -> Result<(u64, Arc<dyn Content>), CodecError> {
+        assert_eq!(stream, StreamId::new(3));
+        Ok((8, Arc::new(Kept(b"<Order/>"))))
     }
 
     #[test]
@@ -322,12 +340,16 @@ mod tests {
             MessageTreatment::BUSINESS,
         );
         assert!(large.record().len() < 400, "{}", large.record().len());
-        let read = Message::from_record(&large.record(), |_, _| {
-            Ok(Arc::new(Kept(b"xxxxxxxxx")) as Arc<dyn Content>)
+        let read = Message::from_record(&large.record(), |_| {
+            Ok((100_000, Arc::new(Kept(b"xxxxxxxxx")) as Arc<dyn Content>))
         })
         .expect("a record keeps no content to check");
         let stream = &read.sections()[0].stream;
-        assert_eq!(stream.len(), 100_000, "the length recorded, nothing read");
+        assert_eq!(
+            stream.len(),
+            100_000,
+            "the length its caller keeps, nothing read"
+        );
         let refused = stream.load().expect_err("a Stream of another length");
         assert!(
             refused.to_string().contains("100000 were kept"),
@@ -349,5 +371,29 @@ mod tests {
         let mut other_form = record;
         other_form[0] = FORM + 1;
         assert!(Message::from_record(&other_form, ledger).is_err());
+    }
+
+    #[test]
+    fn every_enumeration_s_word_is_its_variant_s_name_and_names_it_back() {
+        for source in SOURCES {
+            assert_eq!(MessageCreationSource::worded(source.word()), Some(source));
+        }
+        for priority in PRIORITIES {
+            assert_eq!(MessagePriority::worded(priority.word()), Some(priority));
+        }
+        for profile in PROFILES {
+            assert_eq!(ExecutionProfile::worded(profile.word()), Some(profile));
+        }
+        for durability in DURABILITIES {
+            assert_eq!(
+                MessageDurability::worded(durability.word()),
+                Some(durability)
+            );
+        }
+        assert_eq!(
+            MessageCreationSource::SendPreparation.word(),
+            "SendPreparation"
+        );
+        assert_eq!(MessagePriority::worded("immediate"), None);
     }
 }
