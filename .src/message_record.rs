@@ -53,6 +53,33 @@ impl MessageCreationSource {
     }
 }
 
+impl MessagePriority {
+    /// Its number in the Message's one binary form: what Xmip Storage's
+    /// `message.priority` column keeps, numbered once.
+    #[must_use]
+    pub fn number(self) -> u8 {
+        place(&PRIORITIES, &self)
+    }
+}
+
+impl ExecutionProfile {
+    /// Its number in the Message's one binary form: what Xmip Storage's
+    /// `message.execution_profile` column keeps, numbered once.
+    #[must_use]
+    pub fn number(self) -> u8 {
+        place(&PROFILES, &self)
+    }
+}
+
+impl MessageDurability {
+    /// Its number in the Message's one binary form: what Xmip Storage's
+    /// `message.durability` column keeps, numbered once.
+    #[must_use]
+    pub fn number(self) -> u8 {
+        place(&DURABILITIES, &self)
+    }
+}
+
 // Every value of each kind, in the order the form numbers them, which only
 // grows at its end.
 const SOURCES: [MessageCreationSource; 4] = [
